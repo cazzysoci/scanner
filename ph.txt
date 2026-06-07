@@ -87,6 +87,9 @@ https://rest.baguio.gov.ph
 https://www.mail.agusandelsur.gov.ph
 https://online.bacnotan.gov.ph
 https://solidarity.bacoor.gov.ph
+https://myeg.ph
+https://sugbo.ph
+https://pnp.gov.ph
 https://dashboard-abs.baguio.gov.ph
 https://splms.baguio.gov.ph
 https://news.bohol.gov.ph
